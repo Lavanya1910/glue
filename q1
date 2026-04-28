@@ -1,0 +1,281 @@
+Got it. I’ll write everything **inline (no code blocks at all)** so it reads naturally.
+
+---
+
+# Glue Job Optimization (1TB → 30 mins) — Clean Version (No Code Blocks)
+
+---
+
+## What interviewer is really asking
+
+They want to see if you can **reduce runtime using engineering decisions**, not just scaling hardware.
+
+Core expectation:
+
+* Diagnose bottlenecks
+* Fix Spark execution plan
+* Optimize S3 reads/writes
+* Then scale DPUs
+
+---
+
+## Simple explanation
+
+Your job is slow because:
+
+* Only 1 partition → no parallelism
+* Reading too much data
+* Heavy shuffle during groupBy
+* Too many small output files
+* Possible skew in keys
+
+---
+
+## Correct optimization flow (very important)
+
+Never start with DPU increase.
+
+Correct order:
+
+1. Fix data scan
+2. Fix partitioning
+3. Fix shuffle
+4. Fix skew
+5. Optimize output
+6. THEN scale DPUs
+
+---
+
+## Step 1 — Fix Parallelism (your biggest issue)
+
+Right now it says “single partition processing”
+
+That means:
+
+* Only one executor is doing work
+* Remaining DPUs are idle
+
+Fix by increasing partitions during read or immediately after read:
+
+df = spark.read.parquet("s3://bucket/data/")
+df = df.repartition(400)
+
+Why 400?
+
+* Roughly align with cores available
+* Avoid underutilization
+
+---
+
+## Step 2 — Partition Pruning (massive impact)
+
+Instead of reading full data:
+
+df = spark.read.parquet("s3://bucket/data/")
+
+Read only required partitions:
+
+df = spark.read.parquet("s3://bucket/data/year=2024/month=03/")
+
+Impact:
+
+* 1TB → maybe 50–100GB
+* This alone can reduce runtime drastically
+
+---
+
+## Step 3 — Filter Early (reduce shuffle load)
+
+filtered_df = df.filter(df.status == "active")
+
+Why:
+
+* Reduces data BEFORE aggregation
+* Less network + less memory
+
+---
+
+## Step 4 — Enable AQE (Spark intelligence layer)
+
+spark.conf.set("spark.sql.adaptive.enabled","true")
+spark.conf.set("spark.sql.adaptive.skewJoin.enabled","true")
+spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled","true")
+
+What happens internally:
+
+* Spark adjusts partitions dynamically
+* Detects skew and splits large partitions
+* Reduces unnecessary shuffle
+
+---
+
+## Step 5 — Fix Data Skew (real-world killer)
+
+Problem:
+
+Some customer_id values may dominate.
+
+Example:
+
+customer_id = NULL or popular → 30% of data
+
+Fix using salting:
+
+df = df.withColumn("salt", (rand()*10).cast("int"))
+
+Then group using both keys:
+
+groupBy(customer_id, salt)
+
+Why:
+
+* Breaks large partitions into smaller ones
+* Prevents one executor from becoming bottleneck
+
+---
+
+## Step 6 — Optimize Shuffle
+
+Default shuffle partitions may not be optimal.
+
+spark.conf.set("spark.sql.shuffle.partitions","300")
+
+Rule:
+
+* Too low → large partitions → slow
+* Too high → too many tasks → overhead
+
+---
+
+## Step 7 — Output Optimization (very important)
+
+Instead of writing thousands of files:
+
+final_df = transformed_df.coalesce(50)
+
+Why:
+
+* Reduces small files problem
+* Improves S3 performance
+* Faster downstream queries
+
+---
+
+## Step 8 — Write Partitioned Data
+
+final_df.write.partitionBy("date")
+
+Why:
+
+* Future queries scan less data
+* Enables partition pruning
+
+---
+
+## Step 9 — Now Scale DPU (last step)
+
+After all optimizations:
+
+Move from:
+
+10 DPU → 50–100 DPU
+
+Why now?
+
+* Work is parallelized properly
+* Scaling now actually helps
+
+---
+
+## Performance Gains Breakdown
+
+| Optimization      | Impact             |
+| ----------------- | ------------------ |
+| Partition pruning | 70–90% faster      |
+| Parallelism fix   | 3–5x               |
+| AQE               | 20–30%             |
+| Skew fix          | removes stragglers |
+| Coalesce          | faster writes      |
+
+Final result:
+
+2 hours → ~20–30 minutes achievable
+
+---
+
+## Cost Optimization Insight
+
+Bad approach:
+
+Increase DPU to 100 without fixing logic → cost explosion
+
+Correct approach:
+
+Optimize → then scale → fewer DPUs needed
+
+---
+
+## Reliability / Production Thinking
+
+### Retry safety
+
+* Glue retries tasks automatically
+* Ensure idempotent writes (partition overwrite carefully)
+
+### Bookmark usage
+
+* Use Glue bookmarks to avoid reprocessing
+
+### Failure handling
+
+* Track job metrics in CloudWatch
+* Alert on job duration spike
+
+---
+
+## Debugging in Production
+
+If job still slow:
+
+Check Spark UI:
+
+* Stage taking longest → shuffle issue
+* Task skew → uneven partition size
+* Executor idle → low parallelism
+* Long GC time → memory issue
+
+---
+
+## Senior Interview Answer (say this)
+
+“I wouldn’t start by increasing DPUs. First I’d fix partitioning to ensure parallelism, then apply partition pruning to reduce data scan. I’d enable Spark AQE for dynamic optimization, handle skewed keys, reduce shuffle partitions, and optimize output file sizes. Once the pipeline is efficient, I’d scale DPUs to meet the 30-minute SLA.”
+
+---
+
+## Trap Questions
+
+### Why not directly increase DPU?
+
+Because bottleneck is often data layout, not compute.
+
+---
+
+### Why coalesce and not repartition?
+
+Coalesce reduces partitions without shuffle → cheaper.
+
+---
+
+### What if skew still exists?
+
+Use salting or broadcast joins.
+
+---
+
+If you want next level, I can:
+
+* Walk you through Spark UI debugging like real interview
+* Give failure scenarios (job stuck at 99%)
+* Ask you real AWS interview questions on this
+
+Just tell me 👍
