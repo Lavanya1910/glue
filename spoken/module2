@@ -1,0 +1,239 @@
+Perfect—let’s level this up the same way. I’ll turn **Module 2 (Batch ETL)** into **natural, confident spoken answers** that sound like real project experience.
+
+---
+
+# 🎤 MOCK INTERVIEW – BATCH ETL (SPOKEN STYLE)
+
+---
+
+## Q6. Latest Session per User (Window + Glue)
+
+“Yeah, for this problem I’d use Spark DataFrames for the core logic. DynamicFrames are useful for Glue integration, but for window functions and performance tuning, DataFrames are much cleaner.
+
+So my flow is: read from the Glue Catalog as a DynamicFrame, convert to a DataFrame, and then apply a window function.
+
+First, I clearly define what ‘latest’ means—usually `max(updated_at)` or sometimes `session_end`.
+
+Then I process incrementally using job bookmarks or partition filters like `dt` and `hr`. If late-arriving data is common, I reprocess a small sliding window—like last few hours—and dedupe again.
+
+For deduplication, I use a window function:
+
+* Partition by `user_id`
+* Order by `updated_at desc`
+* Pick `row_number = 1`
+
+If there’s a tie, I add a deterministic tiebreaker like `session_id`.
+
+Performance-wise, I:
+
+* Select only required columns before the window
+* Repartition by `user_id` if needed
+* Handle skew using salting if a few users dominate
+
+For output, I write to S3 as Parquet, usually to a curated path. If it’s a continuously updating table, I either overwrite safely using partition filters or use Iceberg.
+
+And I always validate—distinct `user_id` count in output should match input.
+
+So overall, DataFrames for transformation, DynamicFrames for I/O—that’s my standard pattern.” 
+
+---
+
+## Q7. Joining Small + Huge Dataset Efficiently
+
+“This is a classic optimization problem. My default approach is: broadcast the small dataset and avoid shuffling the big one.
+
+So I read transactions—the large dataset—with partition pruning, like filtering by date. Then I read the customer dataset and select only the columns I need.
+
+I convert both to DataFrames, cache the small one, and then broadcast it during the join. That way the join happens on each executor locally—no massive shuffle.
+
+One thing I always check is size. The small dataset should fit in executor memory—usually tens or hundreds of MB is fine.
+
+If it’s slightly larger, I reduce it:
+
+* Drop unused columns
+* Filter inactive users
+* Deduplicate
+
+If the data is skewed—like a few users dominating—I handle it using salting or adaptive query execution.
+
+Also, I always use Parquet or Iceberg—never CSV—for joins at scale.
+
+If the customer data is in Redshift, I don’t join via JDBC. I first extract it to S3 as Parquet, then join in Glue.
+
+So the key idea is: keep the big dataset distributed, bring the small dataset to it.” 
+
+---
+
+## Q9. Schema Mismatch (S3 → Redshift)
+
+“My approach is to fully normalize the schema in Glue before loading into Redshift. I don’t rely on Redshift to fix anything.
+
+First, I define the target schema clearly—column names, types, precision, timezone handling.
+
+Then in Glue:
+
+* I rename columns to match exactly—usually snake_case and avoiding reserved words
+* I cast all types explicitly—like string to bigint, decimal with correct precision, timestamps in UTC
+
+For timestamps, I always normalize to UTC before loading.
+
+I also handle edge cases:
+
+* Strings like ‘Y/N’ → boolean
+* Invalid casts → filtered or set to null
+
+Then I run validation checks:
+
+* Row counts
+* Null ratios
+* Bad cast counts
+
+For loading, I always go:
+S3 → staging table → MERGE into final table
+
+This gives me idempotency and safe retries.
+
+And if schema drift is expected, I enforce a mapping layer so unexpected fields fail fast instead of silently breaking downstream.
+
+So basically, Glue becomes the schema enforcement layer—not Redshift.” 
+
+---
+
+## Q10. Flattening Nested JSON
+
+“I approach this based on whether I need a single flat table or multiple related tables.
+
+If I need one flat table, I use Spark DataFrames:
+
+* `explode_outer` for arrays so I don’t lose rows
+* Dot notation to extract struct fields
+* Flatten step by step to avoid row explosion
+
+If there are multiple arrays, I don’t flatten everything into one table—that can create a Cartesian explosion. Instead, I create separate tables like:
+
+* Event table
+* Items table
+
+And I use a common key like `event_id` to join them.
+
+Now, if I want speed and less coding, I use DynamicFrames with the `Relationalize` transform. It automatically converts nested JSON into multiple flat tables with relationships.
+
+So:
+
+* DataFrames → when I need control, performance, complex logic
+* DynamicFrames (Relationalize) → when I want quick multi-table flattening
+
+Operationally, I always:
+
+* Filter partitions early
+* Select only required columns
+* Watch out for exploding large arrays
+
+And after flattening, I write as Parquet for efficient downstream queries.”
+
+
+
+---
+
+## Q27. Loading TBs into Redshift + Small File Problem
+
+“For large-scale loads, I never use JDBC inserts. I always use Redshift COPY from S3.
+
+So the flow is:
+Glue → write to S3 (Parquet) → COPY into Redshift staging → MERGE
+
+The key is file sizing.
+
+I make sure:
+
+* Files are large—around 256 MB to 1 GB
+* Number of files matches roughly 2–4× Redshift slices
+
+This gives optimal parallelism without small file overhead.
+
+To handle small files:
+
+* I use `repartition` or `coalesce` in Glue before writing
+* If upstream generates too many small files, I run a compaction job
+
+For loading:
+
+* COPY into staging table
+* Then MERGE into final table
+* Then truncate staging
+
+I also:
+
+* Use a separate WLM queue for loads
+* Run ANALYZE after load
+* Monitor load performance
+
+So the key idea is: optimize both sides—file layout in S3 and load pattern in Redshift.”
+
+
+
+---
+
+## Q30. Joining Redshift + S3 Data
+
+“I avoid joining directly with Redshift over JDBC—it’s slow and expensive.
+
+Instead, I bring the Redshift data into S3 first.
+
+I usually:
+
+* Use UNLOAD from Redshift to S3 (Parquet), or
+* Use DMS for continuous replication
+
+Now both datasets are in S3, so Glue can process them efficiently.
+
+For joining:
+
+* If the dimension is small → broadcast join
+* If large → repartition both sides
+
+For SCD Type 2 data, I resolve point-in-time joins using effective date ranges so each event gets the correct version of customer data.
+
+Challenges I handle:
+
+Schema mismatches:
+
+* Normalize types and column names
+
+Performance:
+
+* Select only needed columns
+* Handle skew
+* Tune partitions
+
+Small files:
+
+* Repartition and compact
+
+Cost:
+
+* Prune data by date
+* Use broadcast where possible
+
+Governance:
+
+* Use Lake Formation to mask PII
+
+So overall, I shift the compute to S3 + Glue and keep Redshift focused on serving queries.”
+
+
+
+---
+
+# 🔥 If You Want Next Level
+
+Now you’re ready for **real AWS-style pressure rounds**.
+
+I can:
+
+* 🔥 Ask **follow-up grilling questions after each answer**
+* 🧠 Do a **full system design interview (end-to-end data platform)**
+* ⚡ Simulate **bar-raiser level edge cases**
+
+Just say:
+👉 *“grill me on module 2”* or *“start system design round”*
